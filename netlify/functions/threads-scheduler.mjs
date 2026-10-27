@@ -77,16 +77,17 @@ export function buildRequest(action, thread, userId, token) {
 async function sbFetch(path, options = {}) {
   const base = process.env.SUPABASE_URL;
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
-  const res = await fetch(`${base}/rest/v1/${path}`, {
-    ...options,
-    headers: {
-      apikey: key,
-      Authorization: `Bearer ${key}`,
-      "Content-Type": "application/json",
-      Prefer: "return=representation",
-      ...(options.headers || {}),
-    },
-  });
+  // Key format lama (JWT, diawali "eyJ") dikirim juga sebagai Bearer.
+  // Key format baru (sb_secret_...) hanya dikirim lewat header apikey.
+  const headers = {
+    apikey: key,
+    "Content-Type": "application/json",
+    Prefer: "return=representation",
+    ...(options.headers || {}),
+  };
+  if (key.startsWith("eyJ")) headers.Authorization = `Bearer ${key}`;
+
+  const res = await fetch(`${base}/rest/v1/${path}`, { ...options, headers });
   if (!res.ok) throw new Error(`Supabase ${res.status}: ${await res.text()}`);
   return res.json();
 }
