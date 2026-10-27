@@ -1,19 +1,33 @@
-// Riset topik: membuat draft thread lewat Gemini (jika GEMINI_API_KEY diset)
-// atau Anthropic (jika ANTHROPIC_API_KEY diset). Hanya user yang sudah login yang boleh memanggil.
-
-const SYSTEM = `Kamu menulis draft thread Threads untuk akun brand UMKM Bertumbuh (aplikasi untuk UMKM).
-Aturan:
-- Bahasa Indonesia santai, tidak menggurui, sudut pandang orang ketiga atau pelaku usaha yang bercerita.
-- Post 1 adalah hook yang memancing emosi (masalah nyata yang dialami pemilik usaha).
-- Post berikutnya menjelaskan penyebab dan insight, lalu post terakhir berupa pertanyaan ajakan diskusi.
-- Setiap post maksimal 500 karakter. Jangan pakai hashtag.
-- Jangan membuat angka atau klaim yang tidak bisa dipertanggungjawabkan. Jika memakai contoh angka, tulis sebagai ilustrasi.
-- Jangan menyebut nama aplikasi atau promosi keras di post pertama.
-Balas HANYA dengan JSON valid, tanpa teks lain, dengan format:
-{"topic": "...", "posts": [{"text": "..."}, ...], "image_idea": "..."}`;
+// Riset topik: membuat draft post Threads lewat Gemini.
+// Hanya user yang sudah login yang boleh memanggil.
+// format: "thread" (post berantai) atau "single" (1 post saja).
 
 const MAX_TEXT = 500;
 const MAX_POSTS = 8;
+
+const BASE_RULES = `Kamu menulis draft post Threads untuk akun brand UMKM Bertumbuh (aplikasi untuk UMKM).
+Aturan umum:
+- Bahasa Indonesia santai, tidak menggurui, sudut pandang orang ketiga atau pelaku usaha yang bercerita.
+- Hook di awal harus memancing emosi lewat masalah nyata yang dialami pemilik usaha.
+- Setiap post maksimal 500 karakter. Jangan pakai hashtag.
+- Jangan membuat angka atau klaim yang tidak bisa dipertanggungjawabkan. Jika memakai contoh angka, tulis sebagai ilustrasi.
+- Jangan menyebut nama aplikasi atau promosi keras di post pertama.`;
+
+const FORMAT_RULES = {
+  thread: `Format: thread berantai, 4 sampai 6 post.
+- Post 1: hook masalah.
+- Post berikutnya: penyebab dan insight, satu gagasan per post.
+- Post terakhir: pertanyaan ajakan diskusi.`,
+  single: `Format: 1 post saja, dalam satu paragraf pendek sampai maksimal 500 karakter.
+- Mulai dengan hook masalah, lalu tutup dengan pertanyaan ajakan diskusi.
+- Hanya satu item di array posts.`,
+};
+
+export function buildSystem(format) {
+  return `${BASE_RULES}\n${FORMAT_RULES[format] || FORMAT_RULES.thread}
+Balas HANYA dengan JSON valid, tanpa teks lain, dengan format:
+{"topic": "...", "posts": [{"text": "..."}], "image_idea": "..."}`;
+}
 
 export function buildUserMessage(brief, rejected) {
   const lines = [`Brief riset: ${brief.trim()}`];
@@ -21,23 +35,26 @@ export function buildUserMessage(brief, rejected) {
     lines.push("Topik berikut sudah ditolak, jangan dipakai lagi:");
     lines.push(...rejected.slice(-30).map((t) => `- ${t}`));
   }
-  lines.push("Buat satu draft thread baru.");
+  lines.push("Buat satu draft baru.");
   return lines.join("\n");
 }
 
-export function parseDraft(rawText) {
-  const cleaned = rawText.trim().replace(/^```(?:json)?\s*/, "").replace(/\s*```$/, "");
+export function parseDraft(rawText, format) {
+  // Ambil blok JSON pertama dari teks, membuang pagar ``` atau teks tambahan di sekitarnya.
+  const start = rawText.indexOf("{");
+  const end = rawText.lastIndexOf("}");
   let data;
   try {
-    data = JSON.parse(cleaned);
-  } catch (err) {
-    throw new Error("Balasan AI bukan JSON valid.");
+    data = JSON.parse(rawText.slice(start, end + 1));
+  } catch {
+    throw new Error(`Balasan Gemini bukan JSON valid. Potongan balasan: ${rawText.slice(0, 200)}`);
   }
   const topic = String(data.topic || "").trim();
   const postsIn = Array.isArray(data.posts) ? data.posts : [];
   if (!topic) throw new Error("Draft tidak punya topik.");
-  if (postsIn.length < 1 || postsIn.length > MAX_POSTS) {
-    throw new Error(`Draft harus punya 1 sampai ${MAX_POSTS} post.`);
+  const max = format === "single" ? 1 : MAX_POSTS;
+  if (postsIn.length < 1 || postsIn.length > max) {
+    throw new Error(`Draft harus punya 1 sampai ${max} post.`);
   }
   const posts = postsIn.map((p, i) => {
     const text = String(p.text || "").trim();
@@ -48,41 +65,22 @@ export function parseDraft(rawText) {
   return { topic, posts, image_idea: String(data.image_idea || "").trim() };
 }
 
-async function callGemini(userMessage) {
+async function callGemini(system, userMessage) {
   const model = process.env.GEMINI_MODEL || "gemini-3.8-flash";
   const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
     method: "POST",
     headers: { "x-goog-api-key": process.env.GEMINI_API_KEY, "content-type": "application/json" },
     body: JSON.stringify({
-      systemInstruction: { parts: [{ text: SYSTEM }] },
+      systemInstruction: { parts: [{ text: system }] },
       contents: [{ role: "user", parts: [{ text: userMessage }] }],
-      generationConfig: { maxOutputTokens: 1500, responseMimeType: "application/json" },
+      generationConfig: { maxOutputTokens: 4000, responseMimeType: "application/json" },
     }),
   });
   if (!res.ok) throw new Error(`API Gemini gagal (${res.status}): ${(await res.text()).slice(0, 200)}`);
   const body = await res.json();
   const parts = body.candidates?.[0]?.content?.parts || [];
-  return parts.map((p) => p.text || "").join("");
-}
-
-async function callAnthropic(userMessage) {
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "x-api-key": process.env.ANTHROPIC_API_KEY,
-      "anthropic-version": "2023-06-01",
-      "content-type": "application/json",
-    },
-    body: JSON.stringify({
-      model: process.env.ANTHROPIC_MODEL || "claude-haiku-5-5",
-      max_tokens: 1500,
-      system: SYSTEM,
-      messages: [{ role: "user", content: userMessage }],
-    }),
-  });
-  if (!res.ok) throw new Error(`API Anthropic gagal (${res.status}): ${(await res.text()).slice(0, 200)}`);
-  const body = await res.json();
-  return (body.content || []).filter((b) => b.type === "text").map((b) => b.text).join("");
+  // Lewati bagian "thought" (proses berpikir model), hanya ambil jawabannya.
+  return parts.filter((p) => !p.thought).map((p) => p.text || "").join("");
 }
 
 // Memastikan token yang dikirim browser adalah user yang sudah login di Supabase.
@@ -106,8 +104,8 @@ export default async function handler(req) {
   const user = await requireUser(req);
   if (!user) return json(401, { error: "Login dulu." });
 
-  if (!process.env.GEMINI_API_KEY && !process.env.ANTHROPIC_API_KEY) {
-    return json(500, { error: "GEMINI_API_KEY atau ANTHROPIC_API_KEY belum diset di Netlify." });
+  if (!process.env.GEMINI_API_KEY) {
+    return json(500, { error: "GEMINI_API_KEY belum diset di Netlify." });
   }
 
   let body;
@@ -118,14 +116,12 @@ export default async function handler(req) {
   }
   const brief = String(body.brief || "");
   const rejected = Array.isArray(body.rejected) ? body.rejected.map(String).filter(Boolean) : [];
+  const format = body.format === "single" ? "single" : "thread";
   if (!brief.trim()) return json(400, { error: "Isi brief riset dulu." });
 
   try {
-    const userMessage = buildUserMessage(brief, rejected);
-    const text = process.env.GEMINI_API_KEY
-      ? await callGemini(userMessage)
-      : await callAnthropic(userMessage);
-    return json(200, { ok: true, draft: parseDraft(text) });
+    const text = await callGemini(buildSystem(format), buildUserMessage(brief, rejected));
+    return json(200, { ok: true, draft: parseDraft(text, format) });
   } catch (err) {
     return json(502, { error: err.message });
   }
