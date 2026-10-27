@@ -1,0 +1,264 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Penjadwal Threads</title>
+<style>
+:root { --bg:#0f1115; --panel:#171a21; --line:#2a2f3a; --text:#e8eaf0; --muted:#8b93a7; --accent:#3b82f6; --ok:#22c55e; --bad:#ef4444; }
+* { box-sizing: border-box; }
+body { margin:0; font-family: -apple-system, system-ui, sans-serif; background:var(--bg); color:var(--text); padding:16px; }
+h1 { font-size:18px; margin:0 0 12px; }
+h2 { font-size:15px; margin:0 0 10px; }
+.panel { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:16px; margin-bottom:16px; max-width:720px; }
+label { display:block; font-size:12px; color:var(--muted); margin:10px 0 4px; }
+input, textarea { width:100%; background:#0f1218; color:var(--text); border:1px solid var(--line); border-radius:8px; padding:9px 10px; font:inherit; }
+textarea { min-height:80px; resize:vertical; }
+button { background:var(--accent); color:#fff; border:0; border-radius:8px; padding:9px 14px; font:inherit; font-size:14px; cursor:pointer; margin-top:10px; }
+button.ghost { background:transparent; border:1px solid var(--line); color:var(--text); }
+button:disabled { opacity:.5; cursor:default; }
+.post { border:1px dashed var(--line); border-radius:10px; padding:12px; margin-bottom:12px; }
+.msg { font-size:13px; margin-top:10px; min-height:18px; }
+.msg.err { color:var(--bad); } .msg.ok { color:var(--ok); }
+.item { border:1px solid var(--line); border-radius:10px; padding:10px; margin-bottom:10px; }
+.hint { font-size:12px; color:var(--muted); }
+.row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+.hidden { display:none; }
+</style>
+</head>
+<body>
+<h1>Penjadwal Threads</h1>
+
+<div id="loginPanel" class="panel hidden">
+  <h2>Masuk</h2>
+  <label>Email</label>
+  <input id="email" type="email" autocomplete="username">
+  <label>Password</label>
+  <input id="password" type="password" autocomplete="current-password">
+  <div class="row"><button id="loginBtn">Masuk</button></div>
+  <div class="msg" id="loginMsg"></div>
+</div>
+
+<div id="appPanel" class="hidden">
+  <div class="panel">
+    <div class="row" style="justify-content:space-between">
+      <h2 style="margin:0">Thread baru</h2>
+      <button class="ghost" id="logoutBtn">Keluar</button>
+    </div>
+    <label>ID thread (huruf, angka, tanda minus)</label>
+    <input id="tid" placeholder="contoh: konveksi-revisi-1">
+    <label>Waktu tayang (WIB)</label>
+    <input id="when" type="datetime-local">
+    <div id="posts"></div>
+    <div class="row">
+      <button class="ghost" id="addPost">+ Tambah post</button>
+      <button id="save">Simpan jadwal</button>
+    </div>
+    <div class="msg" id="msg"></div>
+  </div>
+
+  <div class="panel">
+    <h2>Jadwal</h2>
+    <div id="list"><div class="hint">Memuat...</div></div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
+<script src="config.js"></script>
+<script>
+const $ = (id) => document.getElementById(id);
+const cfg = window.APP_CONFIG;
+const sb = supabase.createClient(cfg.SUPABASE_URL, cfg.SUPABASE_ANON_KEY);
+let posts = [];
+
+function esc(s) {
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+function setMsg(id, text, isErr) {
+  const m = $(id);
+  m.textContent = text;
+  m.className = 'msg ' + (isErr ? 'err' : 'ok');
+}
+function defaultWhen() {
+  const d = new Date(Date.now() + 10 * 60 * 1000);
+  d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
+  return d.toISOString().slice(0, 16);
+}
+
+function renderPosts() {
+  $('posts').innerHTML = posts.map((p, i) => `
+    <div class="post">
+      <div class="row" style="justify-content:space-between">
+        <span class="hint">Post ${i + 1}${i > 0 ? ' (balasan)' : ' (utama)'}</span>
+        <button class="ghost" data-del="${i}">Hapus</button>
+      </div>
+      <textarea data-i="${i}" data-f="text" placeholder="Isi post, maksimal 500 karakter">${esc(p.text)}</textarea>
+      <label>Foto (opsional)</label>
+      <input type="file" accept="image/jpeg,image/png,image/heic,image/heif" data-i="${i}" data-f="file">
+      <div class="hint" data-status="${i}"></div>
+      <label>Link foto (otomatis terisi setelah upload, atau isi manual https://)</label>
+      <input data-i="${i}" data-f="image_url" value="${esc(p.image_url)}">
+    </div>`).join('');
+}
+
+$('posts').addEventListener('input', (e) => {
+  const i = +e.target.dataset.i;
+  if (e.target.dataset.f === 'text') posts[i].text = e.target.value;
+  if (e.target.dataset.f === 'image_url') posts[i].image_url = e.target.value.trim();
+});
+$('posts').addEventListener('click', (e) => {
+  if (e.target.dataset.del === undefined) return;
+  const i = +e.target.dataset.del;
+  if (posts.length === 1) posts = [{ text: '', image_url: '' }];
+  else posts.splice(i, 1);
+  renderPosts();
+});
+// Mengecilkan foto di browser lalu mengubahnya menjadi JPG.
+// Threads hanya menerima JPG/PNG. HEIC bisa dibaca di Safari, tidak di semua browser.
+function toJpegBlob(file) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      const max = 1600;
+      const scale = Math.min(1, max / Math.max(img.width, img.height));
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.round(img.width * scale);
+      canvas.height = Math.round(img.height * scale);
+      canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+      canvas.toBlob((blob) => {
+        URL.revokeObjectURL(url);
+        blob ? resolve(blob) : reject(new Error('Gagal mengubah foto.'));
+      }, 'image/jpeg', 0.88);
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error('Foto tidak bisa dibaca. Coba format JPG atau PNG.'));
+    };
+    img.src = url;
+  });
+}
+
+async function uploadPhoto(i, file) {
+  const status = document.querySelector(`[data-status="${i}"]`);
+  status.textContent = 'Mengunggah foto...';
+  try {
+    const { data: { session } } = await sb.auth.getSession();
+    if (!session) throw new Error('Sesi login habis. Login ulang.');
+    const blob = await toJpegBlob(file);
+    const path = `${session.user.id}/${Date.now()}-${i}.jpg`;
+    const res = await fetch(`${cfg.SUPABASE_URL}/storage/v1/object/threads-media/${path}`, {
+      method: 'POST',
+      headers: {
+        apikey: cfg.SUPABASE_ANON_KEY,
+        Authorization: `Bearer ${session.access_token}`,
+        'Content-Type': 'image/jpeg',
+        'x-upsert': 'false',
+      },
+      body: blob,
+    });
+    if (!res.ok) throw new Error('Upload gagal: ' + (await res.text()).slice(0, 150));
+    posts[i].image_url = `${cfg.SUPABASE_URL}/storage/v1/object/public/threads-media/${path}`;
+    status.textContent = 'Foto terunggah.';
+    renderPosts();
+  } catch (err) {
+    status.textContent = err.message;
+    status.style.color = 'var(--bad)';
+  }
+}
+
+$('posts').addEventListener('change', (e) => {
+  if (e.target.dataset.f !== 'file' || !e.target.files[0]) return;
+  uploadPhoto(+e.target.dataset.i, e.target.files[0]);
+});
+
+$('addPost').addEventListener('click', () => {
+  if (posts.length >= 20) { setMsg('msg', 'Maksimal 20 post.', true); return; }
+  posts.push({ text: '', image_url: '' });
+  renderPosts();
+});
+
+function resetForm() {
+  $('tid').value = '';
+  $('when').value = defaultWhen();
+  posts = [{ text: '', image_url: '' }];
+  renderPosts();
+}
+
+$('save').addEventListener('click', async () => {
+  const id = $('tid').value.trim();
+  if (!/^[a-zA-Z0-9-]{3,60}$/.test(id)) { setMsg('msg', 'ID thread hanya huruf, angka, dan tanda minus (3-60 karakter).', true); return; }
+  if (!$('when').value) { setMsg('msg', 'Isi waktu tayang.', true); return; }
+  const clean = posts.map((p) => {
+    const text = (p.text || '').trim();
+    const image = (p.image_url || '').trim();
+    if (!text && !image) return null;
+    if (text.length > 500) return 'too_long';
+    if (image && !image.startsWith('https://')) return 'bad_image';
+    return { text, ...(image ? { image_url: image } : {}) };
+  });
+  if (clean.includes(null)) { setMsg('msg', 'Ada post yang kosong.', true); return; }
+  if (clean.includes('too_long')) { setMsg('msg', 'Ada post lebih dari 500 karakter.', true); return; }
+  if (clean.includes('bad_image')) { setMsg('msg', 'Link foto harus diawali https://', true); return; }
+
+  // Waktu dari input dianggap WIB (+07:00).
+  const scheduledAt = new Date($('when').value + ':00+07:00').toISOString();
+
+  // Thread yang sudah mulai terbit tidak boleh diubah.
+  const { data: existing } = await sb.from('scheduled_threads').select('status').eq('id', id).maybeSingle();
+  if (existing && existing.status !== 'scheduled') {
+    setMsg('msg', 'Thread ini sudah berjalan atau selesai, jadi tidak bisa diubah. Pakai ID baru.', true);
+    return;
+  }
+
+  const { error } = await sb.from('scheduled_threads').upsert({ id, scheduled_at: scheduledAt, posts: clean });
+  if (error) { setMsg('msg', error.message, true); return; }
+  setMsg('msg', 'Tersimpan.', false);
+  resetForm();
+  loadList();
+});
+
+async function loadList() {
+  const { data, error } = await sb.from('scheduled_threads').select('id, scheduled_at, status, step, posts, error').order('scheduled_at');
+  if (error) { $('list').innerHTML = `<div class="hint">${esc(error.message)}</div>`; return; }
+  if (!data.length) { $('list').innerHTML = '<div class="hint">Belum ada jadwal.</div>'; return; }
+  $('list').innerHTML = data.map((t) => {
+    const when = new Date(t.scheduled_at).toLocaleString('id-ID', { timeZone: 'Asia/Jakarta' });
+    const first = t.posts[0] ? esc(t.posts[0].text.slice(0, 90)) : '';
+    return `<div class="item">
+      <div><b>${esc(t.id)}</b> <span class="hint">· ${esc(t.status)} · ${t.step}/${t.posts.length} post</span></div>
+      <div class="hint">${esc(when)} WIB</div>
+      <div class="hint">${first}</div>
+      ${t.error ? `<div class="hint" style="color:var(--bad)">${esc(t.error)}</div>` : ''}
+    </div>`;
+  }).join('');
+}
+
+async function showApp(session) {
+  $('loginPanel').classList.add('hidden');
+  $('appPanel').classList.remove('hidden');
+  resetForm();
+  loadList();
+}
+
+$('loginBtn').addEventListener('click', async () => {
+  $('loginBtn').disabled = true;
+  const { error } = await sb.auth.signInWithPassword({ email: $('email').value.trim(), password: $('password').value });
+  $('loginBtn').disabled = false;
+  if (error) setMsg('loginMsg', 'Email atau password salah.', true);
+});
+
+$('logoutBtn').addEventListener('click', async () => {
+  await sb.auth.signOut();
+});
+
+sb.auth.onAuthStateChange((event, session) => {
+  if (session) showApp(session);
+  else {
+    $('appPanel').classList.add('hidden');
+    $('loginPanel').classList.remove('hidden');
+  }
+});
+</script>
+</body>
+</html>
